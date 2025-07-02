@@ -67,6 +67,23 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def make_headers_unique(headers):
+    """Hace únicos los headers duplicados agregando sufijos numéricos"""
+    unique_headers = []
+    header_counts = {}
+    
+    for header in headers:
+        if header in header_counts:
+            header_counts[header] += 1
+            unique_header = f"{header}_{header_counts[header]}"
+        else:
+            header_counts[header] = 0
+            unique_header = header
+        
+        unique_headers.append(unique_header)
+    
+    return unique_headers
+
 # Función para cargar datos usando Streamlit Secrets
 @st.cache_data(ttl=300)
 def load_data_secure():
@@ -104,17 +121,52 @@ def load_data_secure():
         spreadsheet = gc.open_by_key(sheet_id)
         worksheet = spreadsheet.worksheet(worksheet_name)
         
-        # Obtener todos los datos
-        data = worksheet.get_all_records()
-        df = pd.DataFrame(data)
+        # Manejar headers duplicados
+        try:
+            # Intentar método estándar primero
+            data = worksheet.get_all_records()
+            df = pd.DataFrame(data)
+        except Exception as e:
+            if "header row" in str(e) and ("unique" in str(e) or "duplicates" in str(e)):
+                # Método alternativo para headers duplicados
+                st.info("🔧 Detectados headers duplicados, aplicando corrección automática...")
+                
+                # Obtener datos como lista de listas
+                all_values = worksheet.get_all_values()
+                
+                if not all_values:
+                    st.error("❌ La hoja de cálculo está vacía")
+                    return None
+                
+                # Tomar la primera fila como headers y hacer únicos
+                headers = all_values[0]
+                unique_headers = make_headers_unique(headers)
+                
+                # Crear DataFrame con headers únicos
+                data_rows = all_values[1:]  # Excluir header
+                df = pd.DataFrame(data_rows, columns=unique_headers)
+                
+                st.success(f"✅ Headers duplicados corregidos automáticamente")
+            else:
+                raise e
+        
+        if df.empty:
+            st.warning("⚠️ La hoja de cálculo no contiene datos")
+            return None
         
         # Limpiar datos básicos
         df = clean_dataframe(df)
         
         return df
         
+    except gspread.SpreadsheetNotFound:
+        st.error("❌ Hoja de cálculo no encontrada. Verifica el sheet_id en los secrets.")
+        return None
+    except gspread.WorksheetNotFound:
+        st.error("❌ Hoja de trabajo no encontrada. Verifica el worksheet_name en los secrets.")
+        return None
     except Exception as e:
-        st.error(f"Error al cargar datos: {e}")
+        st.error(f"❌ Error al cargar datos: {str(e)}")
         return None
 
 def clean_dataframe(df):
@@ -153,17 +205,27 @@ def analyze_tipo_comedor_fallback(df):
     if df is None or df.empty:
         return None, None
     
-    # Contar valores en TIPO DE COMEDOR
-    if 'TIPO DE COMEDOR' not in df.columns:
-        return None, "❌ Columna 'TIPO DE COMEDOR' no encontrada"
+    # Buscar columna de tipo de comedor de forma flexible
+    tipo_col = None
+    for col in df.columns:
+        if 'tipo' in col.lower() and 'comedor' in col.lower():
+            tipo_col = col
+            break
     
-    tipo_counts = df['TIPO DE COMEDOR'].value_counts()
+    if not tipo_col:
+        return None, "❌ No se encontró columna de 'TIPO DE COMEDOR'"
+    
+    # Contar valores en la columna encontrada
+    tipo_counts = df[tipo_col].dropna().value_counts()
+    
+    if tipo_counts.empty:
+        return None, "⚠️ No hay datos válidos en la columna de tipos"
     
     # Calcular porcentajes
-    tipo_percentages = (tipo_counts / len(df)) * 100
+    tipo_percentages = (tipo_counts / len(df.dropna(subset=[tipo_col]))) * 100
     
     # Crear análisis textual
-    total_comedores = len(df)
+    total_comedores = len(df.dropna(subset=[tipo_col]))
     tipos_disponibles = list(tipo_counts.index)
     
     analysis_text = f"""
@@ -172,6 +234,7 @@ def analyze_tipo_comedor_fallback(df):
     **Resumen General:**
     - **Total de comedores registrados:** {total_comedores:,}
     - **Tipos identificados:** {len(tipos_disponibles)}
+    - **Columna utilizada:** {tipo_col}
     
     **Distribución por tipo:**
     """
@@ -203,6 +266,18 @@ def show_connection_status():
     else:
         st.warning("⚠️ Credenciales no configuradas. Configura los secrets para conectar con Google Sheets.")
 
+def find_column_flexible(df, search_terms):
+    """Busca una columna de forma flexible"""
+    for term in search_terms:
+        # Búsqueda exacta
+        if term in df.columns:
+            return term
+        # Búsqueda parcial
+        for col in df.columns:
+            if term.lower() in col.lower():
+                return col
+    return None
+
 def create_filters_sidebar(df):
     """Crea los filtros en el sidebar"""
     st.sidebar.markdown('<div class="filter-header">🔍 Filtros de Búsqueda</div>', unsafe_allow_html=True)
@@ -210,49 +285,39 @@ def create_filters_sidebar(df):
     # Crear copia para filtros
     df_filtered = df.copy()
     
-    # Filtro por Nombre del Comedor
-    if 'NOMBRE DEL COMEDOR' in df.columns:
-        comedores_unicos = ['Todos'] + sorted(df['NOMBRE DEL COMEDOR'].dropna().unique().tolist())
-        comedor_selected = st.sidebar.selectbox("📍 Nombre del Comedor:", comedores_unicos)
-        
-        if comedor_selected != 'Todos':
-            df_filtered = df_filtered[df_filtered['NOMBRE DEL COMEDOR'] == comedor_selected]
+    # Definir columnas a buscar
+    filter_configs = [
+        (['NOMBRE DEL COMEDOR', 'NOMBRE', 'COMEDOR'], '📍 Nombre del Comedor:', 'Todos'),
+        (['BARRIO'], '🏘️ Barrio:', 'Todos'),
+        (['COMUNA'], '🏛️ Comuna:', 'Todas'),
+        (['NODO ', 'NODO'], '🔗 Nodo:', 'Todos'),
+        (['NICHO ', 'NICHO'], '🎯 Nicho:', 'Todos')
+    ]
     
-    # Filtro por Barrio
-    if 'BARRIO' in df.columns:
-        barrios_unicos = ['Todos'] + sorted(df_filtered['BARRIO'].dropna().unique().tolist())
-        barrio_selected = st.sidebar.selectbox("🏘️ Barrio:", barrios_unicos)
-        
-        if barrio_selected != 'Todos':
-            df_filtered = df_filtered[df_filtered['BARRIO'] == barrio_selected]
+    applied_filters = 0
     
-    # Filtro por Comuna
-    if 'COMUNA' in df.columns:
-        comunas_unicas = ['Todas'] + sorted([str(x) for x in df_filtered['COMUNA'].dropna().unique() if str(x) != 'nan'])
-        comuna_selected = st.sidebar.selectbox("🏛️ Comuna:", comunas_unicas)
+    for search_terms, label, default_option in filter_configs:
+        found_col = find_column_flexible(df, search_terms)
         
-        if comuna_selected != 'Todas':
-            df_filtered = df_filtered[df_filtered['COMUNA'].astype(str) == comuna_selected]
-    
-    # Filtro por Nodo
-    if 'NODO ' in df.columns:
-        nodos_unicos = ['Todos'] + sorted([str(x) for x in df_filtered['NODO '].dropna().unique() if str(x) != 'nan'])
-        nodo_selected = st.sidebar.selectbox("🔗 Nodo:", nodos_unicos)
-        
-        if nodo_selected != 'Todos':
-            df_filtered = df_filtered[df_filtered['NODO '].astype(str) == nodo_selected]
-    
-    # Filtro por Nicho
-    if 'NICHO ' in df.columns:
-        nichos_unicos = ['Todos'] + sorted([str(x) for x in df_filtered['NICHO '].dropna().unique() if str(x) != 'nan'])
-        nicho_selected = st.sidebar.selectbox("🎯 Nicho:", nichos_unicos)
-        
-        if nicho_selected != 'Todos':
-            df_filtered = df_filtered[df_filtered['NICHO '].astype(str) == nicho_selected]
+        if found_col:
+            unique_values = [default_option] + sorted([
+                str(x) for x in df_filtered[found_col].dropna().unique() 
+                if str(x) not in ['nan', 'None', '']
+            ])
+            
+            if len(unique_values) > 1:
+                selected = st.sidebar.selectbox(label, unique_values, key=f"filter_{found_col}")
+                
+                if selected != default_option:
+                    df_filtered = df_filtered[df_filtered[found_col].astype(str) == selected]
+                    applied_filters += 1
     
     # Mostrar información de filtros aplicados
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"**Registros mostrados:** {len(df_filtered):,} de {len(df):,}")
+    
+    if applied_filters > 0:
+        st.sidebar.markdown(f"**Filtros activos:** {applied_filters}")
     
     # Botón para limpiar filtros
     if st.sidebar.button("🔄 Limpiar Filtros"):
@@ -274,14 +339,10 @@ def show_metrics(df_filtered, df_original):
     
     with col2:
         # Buscar columna de tipos dinámicamente
-        tipos_col = None
-        for col in df_filtered.columns:
-            if 'tipo' in col.lower() and 'comedor' in col.lower():
-                tipos_col = col
-                break
+        tipo_col = find_column_flexible(df_filtered, ['TIPO DE COMEDOR', 'TIPO', 'COMEDOR'])
         
-        if tipos_col:
-            tipos_activos = len(df_filtered[tipos_col].dropna().unique())
+        if tipo_col:
+            tipos_activos = len(df_filtered[tipo_col].dropna().unique())
         else:
             tipos_activos = 0
             
@@ -294,14 +355,10 @@ def show_metrics(df_filtered, df_original):
     
     with col3:
         # Buscar columna de barrios dinámicamente
-        barrios_col = None
-        for col in df_filtered.columns:
-            if 'barrio' in col.lower():
-                barrios_col = col
-                break
+        barrio_col = find_column_flexible(df_filtered, ['BARRIO'])
         
-        if barrios_col:
-            barrios_activos = len(df_filtered[barrios_col].dropna().unique())
+        if barrio_col:
+            barrios_activos = len(df_filtered[barrio_col].dropna().unique())
         else:
             barrios_activos = 0
             
@@ -314,14 +371,10 @@ def show_metrics(df_filtered, df_original):
     
     with col4:
         # Buscar columna de comunas dinámicamente
-        comunas_col = None
-        for col in df_filtered.columns:
-            if 'comuna' in col.lower():
-                comunas_col = col
-                break
+        comuna_col = find_column_flexible(df_filtered, ['COMUNA'])
         
-        if comunas_col:
-            comunas_activas = len(df_filtered[comunas_col].dropna().unique())
+        if comuna_col:
+            comunas_activas = len(df_filtered[comuna_col].dropna().unique())
         else:
             comunas_activas = 0
             
@@ -331,6 +384,27 @@ def show_metrics(df_filtered, df_original):
             <h2 style="color: #7B1FA2;">{}</h2>
         </div>
         """.format(comunas_activas), unsafe_allow_html=True)
+
+def show_data_info(df):
+    """Muestra información sobre los datos cargados"""
+    st.markdown("## 📋 Información del Dataset")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown(f"""
+        **📊 Resumen de Datos:**
+        - **Filas:** {len(df):,}
+        - **Columnas:** {len(df.columns)}
+        - **Memoria:** {df.memory_usage(deep=True).sum() / 1024:.1f} KB
+        """)
+    
+    with col2:
+        st.markdown(f"""
+        **🕒 Información Temporal:**
+        - **Cargado:** {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
+        - **Fuente:** Google Sheets
+        """)
 
 # Función principal
 def main():
@@ -345,23 +419,22 @@ def main():
         df = load_data_secure()
     
     if df is None:
-        st.error("❌ No se pudieron cargar los datos. Verifica la configuración de secrets.")
+        st.error("❌ No se pudieron cargar los datos.")
         st.info("""
-        ### 🔧 Configuración necesaria:
+        ### 🔧 Pasos para solucionar:
         
-        1. **En Streamlit Cloud**, configura los secrets con:
-           - Credenciales de Google Service Account
-           - ID de Google Sheets
-           - Nombre de la hoja de trabajo
-        
-        2. **Para desarrollo local**, crea el archivo `.streamlit/secrets.toml`
-        
-        3. **Verifica permisos** en Google Sheets y Google Cloud
+        1. **Verifica los secrets** en Streamlit Cloud
+        2. **Confirma el ID de Google Sheets** y nombre de la hoja
+        3. **Asegúrate de que la cuenta de servicio** tenga acceso a la hoja
+        4. **Revisa los logs** para errores específicos
         """)
         return
     
     # Información básica de los datos
-    st.info(f"📊 **Datos cargados exitosamente:** {len(df):,} registros encontrados")
+    st.success(f"📊 **Datos cargados exitosamente:** {len(df):,} registros encontrados")
+    
+    # Mostrar información del dataset
+    show_data_info(df)
     
     # Crear filtros en sidebar
     df_filtered = create_filters_sidebar(df)
@@ -371,37 +444,6 @@ def main():
     
     st.markdown("---")
     
-    # Sección de resumen general
-    st.markdown("## 📋 Resumen General del Sistema")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        ### 🎯 Información del Dataset
-        
-        Este dashboard contiene información completa sobre los comedores comunitarios, 
-        incluyendo datos de:
-        
-        - **Ubicación**: Barrios, comunas, nodos y nichos
-        - **Gestores**: Información de responsables
-        - **Población atendida**: Enfoques diferenciales y etapas vitales
-        - **Necesidades y problemáticas** identificadas
-        - **Articulaciones** con otras instituciones
-        - **Actividades** y líneas de acción
-        """)
-    
-    with col2:
-        st.markdown("""
-        ### 📊 Páginas Disponibles
-        
-        Navega por las diferentes secciones utilizando el menú lateral:
-        
-        - **🥧 Distribución de Tipos de Comedores**: Análisis detallado de los tipos de comedores con gráficos interactivos
-        
-        *Más páginas de análisis estarán disponibles próximamente...*
-        """)
-    
     # Información sobre filtros aplicados
     if len(df_filtered) != len(df):
         st.markdown("## 🔍 Filtros Aplicados")
@@ -409,115 +451,49 @@ def main():
         **Datos filtrados:** Se están mostrando {len(df_filtered):,} de {len(df):,} registros totales.
         
         Los filtros aplicados afectan todas las visualizaciones y análisis en las páginas del dashboard.
-        
-        Para ver todos los datos, usa el botón "🔄 Limpiar Filtros" en el panel lateral.
         """)
     
     # Sección de vista rápida de datos
     st.markdown("## 👀 Vista Rápida de Datos")
     
     if not df_filtered.empty:
-        # Selector de columnas a mostrar
-        default_columns = []
+        # Mostrar las primeras 5 columnas por defecto
+        default_columns = df_filtered.columns[:min(6, len(df_filtered.columns))].tolist()
         
-        # Buscar columnas importantes dinámicamente
-        important_patterns = [
-            ('TIPO DE COMEDOR', 'tipo.*comedor'),
-            ('NOMBRE DEL COMEDOR', 'nombre.*comedor'),
-            ('BARRIO', 'barrio'),
-            ('COMUNA', 'comuna'),
-            ('NODO ', 'nodo'),
-            ('NICHO ', 'nicho')
-        ]
+        selected_columns = st.multiselect(
+            "Selecciona las columnas a mostrar:",
+            options=df_filtered.columns.tolist(),
+            default=default_columns,
+            help="Selecciona qué información quieres ver en la tabla"
+        )
         
-        for expected, pattern in important_patterns:
-            found = False
-            # Búsqueda exacta
-            if expected in df_filtered.columns:
-                default_columns.append(expected)
-                found = True
-            # Búsqueda por patrón si no se encuentra exacta
-            elif not found:
-                import re
-                for col in df_filtered.columns:
-                    if re.search(pattern, col.lower()):
-                        default_columns.append(col)
-                        break
-        
-        # Limitar a columnas que existen
-        available_default_columns = [col for col in default_columns if col in df_filtered.columns]
-        
-        if available_default_columns:
-            selected_columns = st.multiselect(
-                "Selecciona las columnas a mostrar:",
-                options=df_filtered.columns.tolist(),
-                default=available_default_columns[:6],  # Máximo 6 columnas por defecto
-                help="Selecciona qué información quieres ver en la tabla"
+        if selected_columns:
+            # Mostrar datos filtrados
+            st.dataframe(
+                df_filtered[selected_columns],
+                use_container_width=True,
+                height=400
             )
             
-            if selected_columns:
-                # Mostrar datos filtrados
-                st.dataframe(
-                    df_filtered[selected_columns],
-                    use_container_width=True,
-                    height=400
-                )
-                
-                # Opción para descargar datos
-                st.markdown("### 📥 Descargar Datos")
-                csv = df_filtered[selected_columns].to_csv(index=False)
-                st.download_button(
-                    label="📥 Descargar datos filtrados (CSV)",
-                    data=csv,
-                    file_name=f"comedores_filtrados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime='text/csv',
-                    help="Descarga los datos actuales con los filtros aplicados"
-                )
-            else:
-                st.info("👆 Selecciona al menos una columna para mostrar los datos.")
+            # Opción para descargar datos
+            st.markdown("### 📥 Descargar Datos")
+            csv = df_filtered[selected_columns].to_csv(index=False)
+            st.download_button(
+                label="📥 Descargar datos filtrados (CSV)",
+                data=csv,
+                file_name=f"comedores_filtrados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime='text/csv',
+                help="Descarga los datos actuales con los filtros aplicados"
+            )
         else:
-            st.warning("⚠️ No se pudieron identificar las columnas principales automáticamente.")
-            
-            # Mostrar todas las columnas disponibles como fallback
-            st.info("📋 Columnas disponibles en el dataset:")
-            cols_per_row = 3
-            for i in range(0, len(df_filtered.columns), cols_per_row):
-                cols = st.columns(cols_per_row)
-                for j, col in enumerate(df_filtered.columns[i:i+cols_per_row]):
-                    with cols[j]:
-                        st.markdown(f"• {col}")
+            st.info("👆 Selecciona al menos una columna para mostrar los datos.")
     else:
         st.warning("No hay datos para mostrar con los filtros aplicados.")
     
-    # Footer con información adicional
+    # Footer
     st.markdown("---")
-    
-    # Información del sistema
-    col_footer1, col_footer2 = st.columns(2)
-    
-    with col_footer1:
-        st.markdown("""
-        ### 📖 Cómo usar este dashboard
-        
-        1. **Filtros**: Usa el panel lateral para filtrar los datos
-        2. **Navegación**: Accede a diferentes análisis desde el menú lateral
-        3. **Interactividad**: Los gráficos son interactivos - puedes hacer hover, zoom, etc.
-        4. **Descargas**: Puedes descargar los datos y análisis en formato CSV
-        """)
-    
-    with col_footer2:
-        st.markdown(f"""
-        ### ℹ️ Información del Sistema
-        
-        - **Última actualización**: {datetime.now().strftime("%d/%m/%Y %H:%M:%S")}
-        - **Total de registros**: {len(df):,}
-        - **Registros mostrados**: {len(df_filtered):,}
-        - **Fuente**: Google Sheets
-        """)
-    
-    # Mensaje final
     st.markdown("""
-    <div style='text-align: center; color: #666; padding: 20px; background-color: #f8f9fa; border-radius: 10px; margin-top: 20px;'>
+    <div style='text-align: center; color: #666; padding: 20px; background-color: #f8f9fa; border-radius: 10px;'>
         📊 <strong>Dashboard de Comedores Comunitarios</strong><br>
         Desarrollado para el análisis integral de datos de comedores comunitarios<br>
         💡 <em>Usa el menú lateral para navegar entre las diferentes secciones de análisis</em>
