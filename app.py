@@ -6,20 +6,8 @@ from datetime import datetime
 import os
 import sys
 
-# Agregar rutas locales
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-# Importar módulos locales
-try:
-    from utils.google_sheets import load_data_from_sheets, validate_connection
-    from utils.data_analysis import analyze_tipo_comedor
-    from config.settings import APP_TITLE
-    modules_loaded = True
-except ImportError:
-    # Fallback si no existen los módulos (para compatibilidad)
-    st.error("⚠️ Módulos locales no encontrados. Usando configuración básica.")
-    APP_TITLE = "Dashboard Comedores Comunitarios"
-    modules_loaded = False
+# Configuración básica
+APP_TITLE = "Dashboard Comedores Comunitarios"
 
 # Configuración de la página
 st.set_page_config(
@@ -175,12 +163,12 @@ def clean_dataframe(df):
         # Eliminar filas completamente vacías
         df = df.dropna(how='all')
         
-        # Convertir columnas numéricas donde sea posible
+        # Convertir columnas numéricas donde sea posible (corregido)
         numeric_columns = ['COMUNA', 'NODO ', 'NICHO ', 'AÑO DE VINCULACIÓN AL PROGRAMA']
         for col in numeric_columns:
             if col in df.columns:
                 try:
-                    df[col] = pd.to_numeric(df[col], errors='ignore')
+                    df[col] = pd.to_numeric(df[col], errors='coerce')  # Cambiado de 'ignore' a 'coerce'
                 except:
                     pass
         
@@ -199,65 +187,6 @@ def clean_dataframe(df):
     except Exception as e:
         st.error(f"Error limpiando datos: {e}")
         return df
-
-def analyze_tipo_comedor_fallback(df):
-    """Analiza la distribución de tipos de comedores (función de respaldo)"""
-    if df is None or df.empty:
-        return None, None
-    
-    # Buscar columna de tipo de comedor de forma flexible
-    tipo_col = None
-    for col in df.columns:
-        if 'tipo' in col.lower() and 'comedor' in col.lower():
-            tipo_col = col
-            break
-    
-    if not tipo_col:
-        return None, "❌ No se encontró columna de 'TIPO DE COMEDOR'"
-    
-    # Contar valores en la columna encontrada
-    tipo_counts = df[tipo_col].dropna().value_counts()
-    
-    if tipo_counts.empty:
-        return None, "⚠️ No hay datos válidos en la columna de tipos"
-    
-    # Calcular porcentajes
-    tipo_percentages = (tipo_counts / len(df.dropna(subset=[tipo_col]))) * 100
-    
-    # Crear análisis textual
-    total_comedores = len(df.dropna(subset=[tipo_col]))
-    tipos_disponibles = list(tipo_counts.index)
-    
-    analysis_text = f"""
-    ## 📊 Análisis de Tipos de Comedores
-    
-    **Resumen General:**
-    - **Total de comedores registrados:** {total_comedores:,}
-    - **Tipos identificados:** {len(tipos_disponibles)}
-    - **Columna utilizada:** {tipo_col}
-    
-    **Distribución por tipo:**
-    """
-    
-    for tipo, count in tipo_counts.items():
-        percentage = (count / total_comedores) * 100
-        analysis_text += f"\n- **{tipo}:** {count:,} comedores ({percentage:.1f}%)"
-    
-    # Agregar insights adicionales
-    if len(tipo_counts) > 0:
-        tipo_mas_comun = tipo_counts.index[0]
-        analysis_text += f"""
-        
-        **Insights clave:**
-        - El tipo más común es: **{tipo_mas_comun}**
-        - Representa el {tipo_percentages.iloc[0]:.1f}% del total de comedores
-        """
-        
-        if len(tipo_counts) > 1:
-            segundo_tipo = tipo_counts.index[1]
-            analysis_text += f"\n- El segundo tipo más común es: **{segundo_tipo}** ({tipo_percentages.iloc[1]:.1f}%)"
-    
-    return tipo_counts, analysis_text
 
 def show_connection_status():
     """Muestra el estado de la conexión"""
