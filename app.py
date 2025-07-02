@@ -89,10 +89,10 @@ def load_data_secure():
         # Obtener credenciales desde secrets
         credentials_info = dict(st.secrets["gcp_service_account"])
         
-        # Definir el scope
+        # CORREGIDO: Usar scope actualizado
         scope = [
-            'https://spreadsheets.google.com/feeds',
-            'https://www.googleapis.com/auth/drive'
+            'https://www.googleapis.com/auth/spreadsheets.readonly',
+            'https://www.googleapis.com/auth/drive.readonly'
         ]
         
         # Crear credenciales
@@ -105,17 +105,36 @@ def load_data_secure():
         sheet_id = st.secrets.get("google_sheets", {}).get("sheet_id", "1fbs-J474JbvV3USg5aQlLUW9sNqkBjcd63qBU1nJeeI")
         worksheet_name = st.secrets.get("google_sheets", {}).get("worksheet_name", "Respuestas de formulario 1")
         
+        # Debug info
+        st.info(f"🔍 Conectando a Sheet ID: {sheet_id[:20]}...")
+        st.info(f"📋 Buscando hoja: {worksheet_name}")
+        
         # Abrir la hoja de cálculo
         spreadsheet = gc.open_by_key(sheet_id)
-        worksheet = spreadsheet.worksheet(worksheet_name)
+        
+        # Listar todas las hojas disponibles para debug
+        available_sheets = [ws.title for ws in spreadsheet.worksheets()]
+        st.info(f"📄 Hojas disponibles: {', '.join(available_sheets)}")
+        
+        # Intentar obtener la hoja específica
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound:
+            st.error(f"❌ Hoja '{worksheet_name}' no encontrada.")
+            st.info(f"💡 Hojas disponibles: {', '.join(available_sheets)}")
+            return None
         
         # Manejar headers duplicados
         try:
             # Intentar método estándar primero
             data = worksheet.get_all_records()
+            if not data:
+                st.warning("⚠️ La hoja está vacía o no tiene datos.")
+                return None
             df = pd.DataFrame(data)
+            
         except Exception as e:
-            if "header row" in str(e) and ("unique" in str(e) or "duplicates" in str(e)):
+            if "header row" in str(e).lower() and ("unique" in str(e).lower() or "duplicates" in str(e).lower()):
                 # Método alternativo para headers duplicados
                 st.info("🔧 Detectados headers duplicados, aplicando corrección automática...")
                 
@@ -136,6 +155,7 @@ def load_data_secure():
                 
                 st.success(f"✅ Headers duplicados corregidos automáticamente")
             else:
+                st.error(f"❌ Error procesando datos: {str(e)}")
                 raise e
         
         if df.empty:
@@ -149,12 +169,12 @@ def load_data_secure():
         
     except gspread.SpreadsheetNotFound:
         st.error("❌ Hoja de cálculo no encontrada. Verifica el sheet_id en los secrets.")
-        return None
-    except gspread.WorksheetNotFound:
-        st.error("❌ Hoja de trabajo no encontrada. Verifica el worksheet_name en los secrets.")
+        st.info("💡 Asegúrate de que la cuenta de servicio tenga acceso a la hoja.")
         return None
     except Exception as e:
         st.error(f"❌ Error al cargar datos: {str(e)}")
+        # Mostrar más detalles del error para debug
+        st.error(f"🔍 Tipo de error: {type(e).__name__}")
         return None
 
 def clean_dataframe(df):
@@ -163,14 +183,15 @@ def clean_dataframe(df):
         # Eliminar filas completamente vacías
         df = df.dropna(how='all')
         
-        # Convertir columnas numéricas donde sea posible (corregido)
+        # CORREGIDO: Convertir columnas numéricas donde sea posible
         numeric_columns = ['COMUNA', 'NODO ', 'NICHO ', 'AÑO DE VINCULACIÓN AL PROGRAMA']
         for col in numeric_columns:
             if col in df.columns:
                 try:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')  # Cambiado de 'ignore' a 'coerce'
-                except:
-                    pass
+                    # Intentar conversión numérica, mantener NaN para valores no convertibles
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                except Exception as e:
+                    st.warning(f"⚠️ No se pudo convertir columna '{col}' a numérica: {e}")
         
         # Limpiar espacios en blanco en columnas de texto
         text_columns = df.select_dtypes(include=['object']).columns
@@ -179,8 +200,8 @@ def clean_dataframe(df):
                 df[col] = df[col].astype(str).str.strip()
                 # Reemplazar cadenas vacías con NaN
                 df[col] = df[col].replace(['', 'nan', 'None'], None)
-            except:
-                pass
+            except Exception as e:
+                st.warning(f"⚠️ Error limpiando columna '{col}': {e}")
         
         return df
         
@@ -192,8 +213,44 @@ def show_connection_status():
     """Muestra el estado de la conexión"""
     if hasattr(st, 'secrets') and 'gcp_service_account' in st.secrets:
         st.success("✅ Credenciales configuradas correctamente")
+        
+        # Mostrar información adicional de debug
+        with st.expander("🔍 Información de Configuración"):
+            try:
+                sheet_id = st.secrets.get("google_sheets", {}).get("sheet_id", "1fbs-J474JbvV3USg5aQlLUW9sNqkBjcd63qBU1nJeeI")
+                worksheet_name = st.secrets.get("google_sheets", {}).get("worksheet_name", "Respuestas de formulario 1")
+                client_email = st.secrets["gcp_service_account"].get("client_email", "No disponible")
+                
+                st.write(f"**Sheet ID:** {sheet_id}")
+                st.write(f"**Hoja:** {worksheet_name}")
+                st.write(f"**Cuenta de servicio:** {client_email}")
+            except Exception as e:
+                st.write(f"Error mostrando configuración: {e}")
     else:
         st.warning("⚠️ Credenciales no configuradas. Configura los secrets para conectar con Google Sheets.")
+        
+        with st.expander("📖 Guía de Configuración"):
+            st.markdown("""
+            ### Configura los secrets en Streamlit Cloud:
+            
+            ```toml
+            [gcp_service_account]
+            type = "service_account"
+            project_id = "tu-project-id"
+            private_key_id = "..."
+            private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+            client_email = "tu-cuenta@proyecto.iam.gserviceaccount.com"
+            client_id = "..."
+            auth_uri = "https://accounts.google.com/o/oauth2/auth"
+            token_uri = "https://oauth2.googleapis.com/token"
+            auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+            client_x509_cert_url = "..."
+            
+            [google_sheets]
+            sheet_id = "1fbs-J474JbvV3USg5aQlLUW9sNqkBjcd63qBU1nJeeI"
+            worksheet_name = "Respuestas de formulario 1"
+            ```
+            """)
 
 def find_column_flexible(df, search_terms):
     """Busca una columna de forma flexible"""
@@ -361,6 +418,13 @@ def main():
     
     # Información básica de los datos
     st.success(f"📊 **Datos cargados exitosamente:** {len(df):,} registros encontrados")
+    
+    # NUEVO: Mostrar las primeras columnas para debug
+    with st.expander("🔍 Vista previa de datos"):
+        st.write("**Primeras 5 filas:**")
+        st.dataframe(df.head())
+        st.write("**Nombres de columnas:**")
+        st.write(list(df.columns))
     
     # Mostrar información del dataset
     show_data_info(df)
